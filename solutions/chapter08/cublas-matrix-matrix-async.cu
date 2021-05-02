@@ -24,8 +24,8 @@ int N = 1024;
 void generate_random_dense_matrix(int M, int N, float **outA)
 {
     int i, j;
-    double rMax = (double)RAND_MAX;
-    float *A = (float *)malloc(sizeof(float) * M * N);
+    double rMax = 1.0 / (double)RAND_MAX;
+    float *A = (float *)cudaMallocHost(sizeof(float) * M * N);
 
     // For each column
     for (j = 0; j < N; j++)
@@ -34,7 +34,7 @@ void generate_random_dense_matrix(int M, int N, float **outA)
         for (i = 0; i < M; i++)
         {
             double dr = (double)rand();
-            A[j * M + i] = (dr / rMax) * 100.0;
+            A[j * M + i] = (dr * rMax) * 100.0;
         }
     }
 
@@ -55,29 +55,30 @@ int main(int argc, char **argv)
     alpha = 3.0f;
     beta = 4.0f;
 
-    // Generate inputs
+    // random seed for input
     srand(9384);
-    generate_random_dense_matrix(M, N, &A);
-    generate_random_dense_matrix(N, M, &B);
-    C = (float *)malloc(sizeof(float) * M * M);
-    memset(C, 0x00, sizeof(float) * M * M);
 
     // Create the cuBLAS handle
     CHECK_CUBLAS(cublasCreate(&handle));
     CHECK(cudaStreamCreate(&stream));
     CHECK_CUBLAS(cublasSetStream(handle, stream));
 
-    // Allocate device memory
+    // Correct pattern: Allocate device memory
     CHECK(cudaMalloc((void **)&dA, sizeof(float) * M * N));
     CHECK(cudaMalloc((void **)&dB, sizeof(float) * N * M));
     CHECK(cudaMalloc((void **)&dC, sizeof(float) * M * M));
-
-    // Transfer inputs to the device
+    
+    // Set the matrix to zero asynchronously as well
+    CHECK_CUBLAS(cudaMemsetAsync(dC, M * M * sizeof(float), stream));
+    
+    // Then, fill local matrix and trigger the copy immediately to overlap CPU and GPU copy
+    generate_random_dense_matrix(M, N, &A);
     CHECK_CUBLAS(cublasSetMatrixAsync(M, N, sizeof(float), A, M, dA, M,
                 stream));
+    
+    // This will generate while matrix A is being copied
+    generate_random_dense_matrix(N, M, &B);
     CHECK_CUBLAS(cublasSetMatrixAsync(N, M, sizeof(float), B, N, dB, N,
-                stream));
-    CHECK_CUBLAS(cublasSetMatrixAsync(M, M, sizeof(float), C, M, dC, M,
                 stream));
 
     // Execute the matrix-vector multiplication
@@ -100,9 +101,9 @@ int main(int argc, char **argv)
 
     printf("...\n");
 
-    free(A);
-    free(B);
-    free(C);
+    cudaFreeHost(A);
+    cudaFreeHost(B);
+    cudaFreeHost(C);
 
     CHECK(cudaFree(dA));
     CHECK(cudaFree(dB));
